@@ -26,6 +26,8 @@ npm run preview       # 預覽打包結果，同樣使用 4179
 
 ## 部署
 
+正式站：https://haijuchen.github.io/btc-trend/
+
 這是純靜態網站，沒有後端、沒有金鑰。
 
 ```bash
