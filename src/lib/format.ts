@@ -76,6 +76,17 @@ export function formatTaipeiClock(ms: number): string {
   }).format(new Date(ms))
 }
 
+export function formatTaipeiShort(ms: number): string {
+  return new Intl.DateTimeFormat('zh-TW', {
+    timeZone: TAIPEI,
+    month: 'numeric',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).format(new Date(ms))
+}
+
 export function formatShortDate(ms: number): string {
   return new Intl.DateTimeFormat('zh-TW', {
     timeZone: TAIPEI,

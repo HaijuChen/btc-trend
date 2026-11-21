@@ -187,21 +187,14 @@ function parseBinanceKlines(rows: unknown): Candle[] {
   return clean
 }
 
-async function fetchBinanceKlines(base: string, interval: IntervalId): Promise<Candle[]> {
-  const rows = await fetchJson<unknown>(
-    `${base}/api/v3/klines?symbol=BTCUSDT&interval=${BINANCE_INTERVAL[interval]}&limit=500`,
-    12000,
-  )
-  return parseBinanceKlines(rows)
+function klineLimit(interval: IntervalId): { binance: number; okx: number; gate: number } {
+  // The 4h replay needs a long closed-candle history. 1000 is the spot kline cap on Binance and Gate.
+  if (interval === '4h') return { binance: 1000, okx: 1000, gate: 1000 }
+  return { binance: 500, okx: 300, gate: 300 }
 }
 
-async function fetchOkxKlines(interval: IntervalId): Promise<Candle[]> {
-  const body = await fetchJson<{ code?: string; data?: string[][] }>(
-    `https://www.okx.com/api/v5/market/candles?instId=BTC-USDT&bar=${OKX_BAR[interval]}&limit=300`,
-    12000,
-  )
-  if (body.code !== '0' || !Array.isArray(body.data)) throw new Error('OKX K 線失敗')
-  const candles = body.data.map((row) => ({
+function parseOkxRows(rows: string[][]): Candle[] {
+  return rows.map((row) => ({
     time: Math.floor(Number(row[0]) / 1000),
     open: Number(row[1]),
     high: Number(row[2]),
@@ -209,14 +202,51 @@ async function fetchOkxKlines(interval: IntervalId): Promise<Candle[]> {
     close: Number(row[4]),
     volume: Number(row[5]),
   }))
-  const clean = sanitizeCandles(candles)
-  if (clean.length < 40) throw new Error('OKX K 線太短')
-  return clean
 }
 
-async function fetchGateKlines(interval: IntervalId): Promise<Candle[]> {
+async function fetchBinanceKlines(base: string, interval: IntervalId, limit: number): Promise<Candle[]> {
+  const rows = await fetchJson<unknown>(
+    `${base}/api/v3/klines?symbol=BTCUSDT&interval=${BINANCE_INTERVAL[interval]}&limit=${limit}`,
+    12000,
+  )
+  return parseBinanceKlines(rows)
+}
+
+async function fetchOkxKlines(interval: IntervalId, limit: number): Promise<Candle[]> {
+  const recentLimit = Math.min(limit, 300)
+  const body = await fetchJson<{ code?: string; data?: string[][] }>(
+    `https://www.okx.com/api/v5/market/candles?instId=BTC-USDT&bar=${OKX_BAR[interval]}&limit=${recentLimit}`,
+    12000,
+  )
+  if (body.code !== '0' || !Array.isArray(body.data)) throw new Error('OKX K 線失敗')
+  let candles = sanitizeCandles(parseOkxRows(body.data))
+  if (candles.length < 40) throw new Error('OKX K 線太短')
+  if (interval !== '4h' || candles.length >= limit) return candles
+
+  let guard = 0
+  while (candles.length < limit && guard < 8) {
+    guard += 1
+    const oldestMs = candles[0].time * 1000
+    try {
+      const page = await fetchJson<{ code?: string; data?: string[][] }>(
+        `https://www.okx.com/api/v5/market/history-candles?instId=BTC-USDT&bar=4H&limit=100&after=${oldestMs}`,
+        12000,
+      )
+      if (page.code !== '0' || !Array.isArray(page.data) || page.data.length === 0) break
+      const merged = sanitizeCandles([...parseOkxRows(page.data), ...candles])
+      if (merged.length <= candles.length) break
+      candles = merged
+    } catch (error) {
+      console.warn('[btc] OKX 4h 歷史 K 線中斷', error)
+      break
+    }
+  }
+  return candles
+}
+
+async function fetchGateKlines(interval: IntervalId, limit: number): Promise<Candle[]> {
   const rows = await fetchJson<unknown[][]>(
-    `https://api.gateio.ws/api/v4/spot/candlesticks?currency_pair=BTC_USDT&interval=${GATE_BAR[interval]}&limit=300`,
+    `https://api.gateio.ws/api/v4/spot/candlesticks?currency_pair=BTC_USDT&interval=${GATE_BAR[interval]}&limit=${limit}`,
     12000,
   )
   if (!Array.isArray(rows)) throw new Error('Gate K 線失敗')
@@ -234,10 +264,11 @@ async function fetchGateKlines(interval: IntervalId): Promise<Candle[]> {
 }
 
 async function fetchInterval(interval: IntervalId): Promise<{ candles: Candle[]; source: string }> {
+  const limit = klineLimit(interval)
   const result = await firstSuccess<Candle[]>([
-    ...BINANCE_SPOT.map((base) => ({ source: '幣安', run: () => fetchBinanceKlines(base, interval) })),
-    { source: 'OKX', run: () => fetchOkxKlines(interval) },
-    { source: 'Gate.io', run: () => fetchGateKlines(interval) },
+    ...BINANCE_SPOT.map((base) => ({ source: '幣安', run: () => fetchBinanceKlines(base, interval, limit.binance) })),
+    { source: 'OKX', run: () => fetchOkxKlines(interval, limit.okx) },
+    { source: 'Gate.io', run: () => fetchGateKlines(interval, limit.gate) },
   ])
   return { candles: result.value, source: result.source }
 }

@@ -4,9 +4,13 @@ import {
   ColorType,
   CrosshairMode,
   LineSeries,
+  LineStyle,
   createChart,
+  createSeriesMarkers,
   type IChartApi,
   type ISeriesApi,
+  type ISeriesMarkersPluginApi,
+  type SeriesMarker,
   type TickMarkType,
   type Time,
   type UTCTimestamp,
@@ -14,6 +18,7 @@ import {
 import { CHART_INTERVALS, INTERVAL_LABEL, INTERVAL_SECONDS, type IntervalId } from '../config.ts'
 import { formatChartTime, formatCrosshairTime } from '../lib/format.ts'
 import { ema } from '../lib/math.ts'
+import type { StopLinePoint, StrategyMarker } from '../lib/strategy.ts'
 import type { Candle } from '../types.ts'
 
 const DEFAULT_BARS: Record<IntervalId, number> = {
@@ -36,6 +41,42 @@ type ChartBundle = {
   ema20: ISeriesApi<'Line'>
   ema50: ISeriesApi<'Line'>
   ema200: ISeriesApi<'Line'>
+  stop: ISeriesApi<'Line'>
+  markers: ISeriesMarkersPluginApi<Time>
+}
+
+function toMarkers(items: StrategyMarker[]): SeriesMarker<Time>[] {
+  return items
+    .map((item): SeriesMarker<Time> => {
+      const time = item.time as UTCTimestamp
+      if (item.kind === 'entry' && item.side === 'long') {
+        return { time, position: 'belowBar', shape: 'arrowUp', color: '#8fd0a8', text: '多' }
+      }
+      if (item.kind === 'entry' && item.side === 'short') {
+        return { time, position: 'aboveBar', shape: 'arrowDown', color: '#ef8b78', text: '空' }
+      }
+      if (item.kind === 'stop') {
+        return item.side === 'long'
+          ? { time, position: 'aboveBar', shape: 'arrowDown', color: '#e0b15a', text: '停損' }
+          : { time, position: 'belowBar', shape: 'arrowUp', color: '#e0b15a', text: '停損' }
+      }
+      return item.side === 'long'
+        ? { time, position: 'belowBar', shape: 'arrowUp', color: '#e0b15a', text: '反多' }
+        : { time, position: 'aboveBar', shape: 'arrowDown', color: '#e0b15a', text: '反空' }
+    })
+    .sort((a, b) => Number(a.time) - Number(b.time))
+}
+
+function toStopData(points: StopLinePoint[]) {
+  const sorted = points.slice().sort((a, b) => a.time - b.time)
+  const data: Array<{ time: UTCTimestamp; value?: number }> = []
+  let last = -Infinity
+  for (const point of sorted) {
+    if (point.time <= last) continue
+    last = point.time
+    data.push(point.value == null ? { time: point.time as UTCTimestamp } : { time: point.time as UTCTimestamp, value: point.value })
+  }
+  return data
 }
 
 function toCandleData(candles: Candle[]) {
@@ -85,6 +126,10 @@ export function CandleChart({
   source,
   livePrice,
   updatedAt,
+  showStrategy,
+  onToggleStrategy,
+  strategyMarkers,
+  strategyStops,
 }: {
   interval: IntervalId
   onInterval: (interval: IntervalId) => void
@@ -93,6 +138,10 @@ export function CandleChart({
   source: string | null
   livePrice: number | null
   updatedAt: number | null
+  showStrategy: boolean
+  onToggleStrategy: () => void
+  strategyMarkers: StrategyMarker[]
+  strategyStops: StopLinePoint[]
 }) {
   const hostRef = useRef<HTMLDivElement>(null)
   const bundleRef = useRef<ChartBundle | null>(null)
@@ -160,7 +209,17 @@ export function CandleChart({
     const ema20 = chart.addSeries(LineSeries, { ...lineOptions, color: EMA_COLORS[20], lineWidth: 2, title: 'EMA20' })
     const ema50 = chart.addSeries(LineSeries, { ...lineOptions, color: EMA_COLORS[50], lineWidth: 2, title: 'EMA50' })
     const ema200 = chart.addSeries(LineSeries, { ...lineOptions, color: EMA_COLORS[200], lineWidth: 2, title: 'EMA200' })
-    bundleRef.current = { chart, candles: candleSeries, ema20, ema50, ema200 }
+    const stop = chart.addSeries(LineSeries, {
+      ...lineOptions,
+      color: '#e0b15a',
+      lineWidth: 2,
+      lineStyle: LineStyle.Dashed,
+      title: '停損',
+      visible: false,
+      lastValueVisible: true,
+    })
+    const markers = createSeriesMarkers(candleSeries, [])
+    bundleRef.current = { chart, candles: candleSeries, ema20, ema50, ema200, stop, markers }
     return () => {
       bundleRef.current = null
       chart.remove()
@@ -195,6 +254,20 @@ export function CandleChart({
     }
     countRef.current = count
   }, [candles, interval, show20, show50, show200])
+
+  useEffect(() => {
+    const bundle = bundleRef.current
+    if (!bundle) return
+    if (!showStrategy || interval !== '4h') {
+      bundle.markers.setMarkers([])
+      bundle.stop.setData([])
+      bundle.stop.applyOptions({ visible: false })
+      return
+    }
+    bundle.stop.applyOptions({ visible: true })
+    bundle.stop.setData(toStopData(strategyStops))
+    bundle.markers.setMarkers(toMarkers(strategyMarkers))
+  }, [showStrategy, interval, strategyMarkers, strategyStops])
 
   useEffect(() => {
     const bundle = bundleRef.current
@@ -240,6 +313,7 @@ export function CandleChart({
         <Toggle on={show20} color={EMA_COLORS[20]} label="EMA 20" onClick={() => setShow20((value) => !value)} />
         <Toggle on={show50} color={EMA_COLORS[50]} label="EMA 50" onClick={() => setShow50((value) => !value)} />
         <Toggle on={show200} color={EMA_COLORS[200]} label="EMA 200" onClick={() => setShow200((value) => !value)} />
+        <Toggle on={showStrategy && interval === '4h'} color="#e0b15a" label="策略標記" onClick={onToggleStrategy} />
       </div>
       <div className="chart-frame">
         <div ref={hostRef} className="chart-canvas" />
@@ -249,6 +323,7 @@ export function CandleChart({
         {source ? `K 線來源 ${source}` : '沒有 K 線來源'}
         {forming ? ' · 這根 K 線還沒收完' : ''}
         {scored ? '' : ' · 這個週期只供看盤，不計入總分'}
+        {showStrategy && interval === '4h' ? ' · 箭頭與虛線是理論重播，不是委託' : ''}
         {' · '}
         <a href="https://www.tradingview.com/lightweight-charts/" target="_blank" rel="noreferrer">
           TradingView Lightweight Charts

@@ -4,17 +4,23 @@ import { CandleChart } from './components/CandleChart.tsx'
 import { ContextGrid } from './components/ContextGrid.tsx'
 import { Levels } from './components/Levels.tsx'
 import { MarketStrip, PriceBar } from './components/PriceBar.tsx'
+import { StrategyPanel } from './components/StrategyPanel.tsx'
 import { Verdict } from './components/Verdict.tsx'
 import type { IntervalId, ScoreIntervalId } from './config.ts'
 import { useMarket } from './hooks/useMarket.ts'
 import { formatSignedPct, formatUsd } from './lib/format.ts'
 import { labelFor } from './lib/score.ts'
+import { analyzeStrategy, type StopLinePoint, type StrategyMarker } from './lib/strategy.ts'
 import { buildSummary } from './lib/summary.ts'
+
+const NO_MARKERS: StrategyMarker[] = []
+const NO_STOPS: StopLinePoint[] = []
 
 export default function App() {
   const { state, reload } = useMarket()
   const [chartInterval, setChartInterval] = useState<IntervalId>('1d')
   const [activeFrame, setActiveFrame] = useState<ScoreIntervalId>('1w')
+  const [showStrategy, setShowStrategy] = useState(false)
 
   useEffect(() => {
     const ticker = state.ticker
@@ -37,10 +43,24 @@ export default function App() {
   }, [state.score, state.fearGreed, state.funding, state.longShort])
 
   const verdict = state.score ? labelFor(state.score.signal, 'composite') : null
+  const strategy = useMemo(() => {
+    const candles = state.candles['4h']
+    if (!candles || candles.length === 0 || state.updatedAt == null) return null
+    return analyzeStrategy(candles, state.updatedAt / 1000)
+  }, [state.candles, state.updatedAt])
 
   const selectFrame = (id: ScoreIntervalId) => {
     setActiveFrame(id)
     document.getElementById('breakdown')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+
+  const toggleStrategy = () => {
+    if (chartInterval !== '4h') {
+      setChartInterval('4h')
+      setShowStrategy(true)
+      return
+    }
+    setShowStrategy((value) => !value)
   }
 
   return (
@@ -60,6 +80,12 @@ export default function App() {
               priceLive={state.priceLive}
             />
             <Verdict score={state.score} summary={summary} onSelectFrame={selectFrame} />
+            <StrategyPanel
+              analysis={strategy}
+              source={state.candleSources['4h'] ?? null}
+              error={state.candleErrors['4h'] ?? null}
+              price={state.ticker.price}
+            />
             <CandleChart
               interval={chartInterval}
               onInterval={setChartInterval}
@@ -68,6 +94,10 @@ export default function App() {
               source={state.candleSources[chartInterval] ?? null}
               livePrice={state.ticker.price}
               updatedAt={state.updatedAt}
+              showStrategy={showStrategy}
+              onToggleStrategy={toggleStrategy}
+              strategyMarkers={strategy?.markers ?? NO_MARKERS}
+              strategyStops={strategy?.stopLine ?? NO_STOPS}
             />
             <Breakdown score={state.score} active={activeFrame} onActive={setActiveFrame} />
             <ContextGrid
@@ -90,6 +120,9 @@ export default function App() {
         <h2>免責聲明</h2>
         <p>
           本頁把公開行情換算成技術指標與加權分數，只供學習與市場觀察。它不是投資建議，也不是買賣比特幣或任何加密資產的邀約。指標會落後、會失真，過去的價格形態不代表未來。加密資產波動很大，可能在短時間內大幅上漲或下跌。請自行研究，並為自己的決定負責。
+        </p>
+        <p>
+          「長線策略參考訊號」是四小時唐奇安突破加 ATR 移動停損的理論重播，不是實際委託，也不是投資建議。這套策略的樣本外測試是 −1.2R。來源機器人目前只管理已經有的部位，不會新開比特幣倉位。
         </p>
         <p className="fine">
           現貨報價與 K 線預設讀幣安公開行情，失敗時改接 OKX、Gate.io，再不行則用 CoinGecko。永續資金費率、未平倉與多空比預設讀幣安合約，失敗時改接 OKX、Bitget 或 Gate.io。恐懼與貪婪指數來自 Alternative.me，總市值與比特幣占比來自 CoinGecko。圖表由{' '}
